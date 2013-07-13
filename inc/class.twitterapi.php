@@ -2,18 +2,14 @@
 	// TWEET NEST
 	// Twitter API class
 	// (a simple one)
-	
+
+require_once "twitteroauth/twitteroauth.php";
+require_once "twitteroauth/config.php";
+
 	class TwitterApi {
-		// HTTP grabbin' cURL options, by exsecror
-		public $httpOptions = array(
-			CURLOPT_FORBID_REUSE   => true,
-			CURLOPT_POST           => false,
-			CURLOPT_RETURNTRANSFER => true,
-			CURLOPT_TIMEOUT        => 30,
-			CURLOPT_USERAGENT      => "Mozilla/5.0 (Compatible; libCURL)",
-			CURLOPT_VERBOSE        => false,
-			CURLOPT_SSL_VERIFYPEER => false // Insecurity?
-		);
+
+        private $connection;
+
 		public $dbMap = array(
 			"id_str"       => "tweetid",
 			"created_at"   => "time",
@@ -25,39 +21,26 @@
 			"contributors" => "contributors",
 			"user.id"      => "userid"
 		);
+
+		// Nothing here so far...
+        public function __construct(){}
+
+		// Only lazily create the OAuth connection when needed.
+		private function createConnection(){
+			global $config;
+			if(!$this->connection){
+				$this->connection = new TwitterOAuth(CONSUMER_KEY, CONSUMER_SECRET, $config['twitter_token'], $config['twitter_token_secr']);
+			}
+		}
 		
-		public function query($path, $format = "json", $auth = NULL, $ssl = true){
-			$format = mb_strtolower(trim($format));
-			$path   = ltrim($path, "/");
-			if($format != "xml" && $format != "json"){ return false; }
-			$url    = "http" . ($ssl ? "s" : "") . "://api.twitter.com/" . $path;
-			$file   = "";
-			
-			do {
-				if($file != ""){ sleep(2); } // Wait two secs if we got a failwhale
-				$file = getURL($url, $auth);
-				if(is_array($file)){ return $file; } // Error
-			} while(
-				// Protect against failwhale
-				(
-					($format == "xml" && mb_substr($file, 0, 2) != "<?") || // Invalid XML
-					($format == "json" && !in_array(mb_substr($file, 0, 1), array("[", "{"))) // Invalid JSON
-				)
-				&& mb_substr_count(mb_strtolower($file), "over capacity") > 0
-			);
-			if($format == "xml"){
-				$data = simplexml_load_string($file);
-				if(!empty($data->error)){ die($data->error); }
-				return $data;
+		public function query($path, $parameters = array()){
+			$this->createConnection();
+
+			if($this->connection instanceof TwitterOAuth){
+				return $this->connection->get($path, $parameters);
 			}
-			if($format == "json"){
-				// Prevent issues with long ints on 32-bit systems
-				$file = preg_replace("/\"([a-z_]+_)?id\":(\d+)(,|\}|\])/", "\"$1id\":\"$2\"$3", $file);
-				$data = json_decode($file);
-				if(!empty($data->error)){ die($data->error); }
-				return $data;
-			}
-			return false;
+
+			return null;
 		}
 		//TODO: BUILD IN SUPPORT FOR "RATE LIMIT EXCEEDED"
 		

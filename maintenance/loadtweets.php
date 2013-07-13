@@ -46,8 +46,11 @@
 		global $twitterApi;
 		$p = trim($p);
 		if(!$twitterApi->validateUserParam($p)){ return false; }
-		$data = $twitterApi->query("1/users/show.json?" . $p);
-		if(is_array($data) && $data[0] === false){ dieout(l(bad("Error: " . $data[1] . "/" . $data[2]))); }
+        $p = explode('=', $p);
+        $data = $twitterApi->query('users/show', array($p[0] => $p[1]));
+		if(is_array($data) && $data[0] === false){
+			dieout(l(bad('Error: ' . $data[1] . '/' . $data[2])));
+		}
 		return $data->statuses_count;
 	}
 	
@@ -59,6 +62,14 @@
 		$tweets   = array();
 		$sinceID  = 0;
 		$maxID    = 0;
+
+		// Check for authentication
+		if(!isset($config['consumer_key']) || !isset($config['consumer_secret'])){
+			die("Consumer key and secret not found. These are required for authentication to Twitter. \n" .
+				"Please point your browser to the authorize.php file to configure these.\n");
+		}
+
+        list($userparam, $uservalue) = explode('=', $p);
 		
 		echo l("Importing:\n");
 		
@@ -81,10 +92,13 @@
 		
 		// Find total number of tweets
 		$total = totalTweets($p);
-		if($total > 3200){ $total = 3200; } // Due to current Twitter limitation
-		$pages = ceil($total / $maxCount);
-		
-		echo l("Total tweets: <strong>" . $total . "</strong>, Approx. page total: <strong>" . $pages . "</strong>\n");
+		if(is_numeric($total)){
+			if($total > 3200){ $total = 3200; } // Due to current Twitter limitation
+			$pages = ceil($total / $maxCount);
+
+			echo l("Total tweets: <strong>" . $total . "</strong>, Approx. page total: <strong>" . $pages . "</strong>\n");
+		}
+
 		if($sinceID){
 			echo l("Newest tweet I've got: <strong>" . $sinceID . "</strong>\n");
 		}
@@ -93,14 +107,24 @@
 		
 		// Retrieve tweets
 		do {
-			// Determine path to Twitter timeline resource
-			$path =	"1/statuses/user_timeline.json?" . $p . // <-- user argument
-					"&include_rts=true&include_entities=true&count=" . $maxCount .
-					($sinceID ? "&since_id=" . $sinceID : "") . ($maxID ? "&max_id=" . $maxID : "");
 			// Announce
-			echo l("Retrieving page <strong>#" . $page . "</strong>: <span class=\"address\">" . ls($path) . "</span>\n");
+			echo l("Retrieving page <strong>#" . $page . "</strong>:\n");
 			// Get data
-			$data = $twitterApi->query($path);
+            $params = array(
+                $userparam         => $uservalue,
+                'include_rts'      => true,
+                'include_entities' => true,
+                'count'            => $maxCount
+            );
+
+            if($sinceID){
+                $params['since_id'] = $sinceID;
+            }
+            if($maxID){
+                $params['max_id']   = $maxID;
+            }
+
+            $data = $twitterApi->query('statuses/user_timeline', $params);
 			// Drop out on connection error
 			if(is_array($data) && $data[0] === false){ dieout(l(bad("Error: " . $data[1] . "/" . $data[2]))); }
 			
@@ -109,6 +133,12 @@
 			if(!empty($data)){
 				echo l("<ul>");
 				foreach($data as $i => $tweet){
+
+                    // First, let's check if an API error occured
+                    if(is_array($tweet) && is_object($tweet[0]) && property_exists($tweet[0], 'message')){
+                        dieout(l(bad('A Twitter API error occured: ' . $tweet[0]->message)));
+                    }
+
 					// Shield against duplicate tweet from max_id
 					if(!IS64BIT && $i == 0 && $maxID == $tweet->id_str){ unset($data[0]); continue; }
 					// List tweet
@@ -160,14 +190,31 @@
 		// Resetting these
 		$favs  = array(); $maxID = 0; $sinceID = 0; $page = 1;
 		do {
-			$path = "1/favorites.json?" . $p . "&count=" . $maxCount . ($maxID ? "&max_id=" . $maxID : "");
-			echo l("Retrieving page <strong>#" . $page . "</strong>: <span class=\"address\">" . ls($path) . "</span>\n");
-			$data = $twitterApi->query($path);
+			echo l("Retrieving page <strong>#" . $page . "</strong>:\n");
+
+            $params = array(
+                $userparam => $uservalue,
+                'count'    => $maxCount
+            );
+
+            if($maxID){
+                $params['max_id']   = $maxID;
+            }
+
+			$data = $twitterApi->query('favorites/list', $params);
+
 			if(is_array($data) && $data[0] === false){ dieout(l(bad("Error: " . $data[1] . "/" . $data[2]))); }
 			echo l("<strong>" . ($data ? count($data) : 0) . "</strong> total favorite tweets on this page\n");
+
 			if(!empty($data)){
 				echo l("<ul>");
 				foreach($data as $i => $tweet){
+
+                    // First, let's check if an API error occured
+                    if(is_array($tweet) && is_object($tweet[0]) && property_exists($tweet[0], 'message')){
+                        dieout(l(bad('A Twitter API error occured: ' . $tweet[0]->message)));
+                    }
+
 					if(!IS64BIT && $i == 0 && $maxID == $tweet->id_str){ unset($data[0]); continue; }
 					if($tweet->user->id_str == $uid){
 						echo l("<li>" . $tweet->id_str . " " . $tweet->created_at . "</li>\n");

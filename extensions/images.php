@@ -48,7 +48,7 @@
 					if($imgid){
 						if($domain == "twimg.com"){
 							$displaylink = $linkmap ? $linkmap[$link] : $link;
-							$imgs[$displaylink] = $http . "://p.twimg.com" . $l['path'] . ":thumb";
+							$imgs[$displaylink] = $http . "://pbs.twimg.com" . $l['path'] . ":thumb";
 						}
 						if($domain == "twitpic.com"){
 							$imgs[$link] = $http . "://twitpic.com/show/thumb/" . $imgid;
@@ -75,7 +75,7 @@
 						if($domain == "twitvid.com"){
 							$imgs[$link] = $http . "://images.twitvid.com/" . $imgid . ".jpg";
 						}
-						if($domain == "instagr.am"){
+						if($domain == "instagr.am" || $domain == "instagram.com"){
 							$html = (string)getURL($link);
 							preg_match('/<meta property="og:image" content="([^"]+)"\s*\/>/i', $html, $matches);
 							if(isset($matches[1])){
@@ -93,7 +93,7 @@
 		
 		public function displayTweet($d, $tweet){
 			@$tweetextra = unserialize($tweet['extra']);
-			if(array_key_exists("imgs", $tweetextra)){
+			if(is_array($tweetextra) && array_key_exists("imgs", $tweetextra)){
 				preg_match("/^([\t]+)</", $d, $m); $x = $m[1];
 				$ds    = explode("\n", $d, 2);
 				$imgd  = ""; $i = 1; $is = array();

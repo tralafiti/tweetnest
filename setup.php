@@ -9,11 +9,15 @@
 	
 	mb_language("uni");
 	mb_internal_encoding("UTF-8");
+    session_start();
+
 	header("Content-Type: text/html; charset=utf-8");
 	
 	require "inc/config.php";
 	
 	$GLOBALS['error'] = false;
+
+	$_SESSION['redirect_source'] = 'setup';
 	
 	function s($str){ return htmlspecialchars($str, ENT_NOQUOTES); } // Shorthand
 	
@@ -34,7 +38,7 @@
 	}
 	
 	function errorHandler($errno, $message, $filename, $line, $context){
-		if(error_reporting() == 0){ return; }
+		if(error_reporting() == 0){ return false; }
 		if($errno & (E_ALL ^ E_NOTICE)){
 			$GLOBALS['error'] = true;
 			$types = array(
@@ -57,12 +61,27 @@
 		return true;
 	}
 	set_error_handler("errorHandler");
-	
+
+	// Utility function, thanks to stackoverflow.com/questions/3835636
+	function str_lreplace($search, $replace, $subject){ $pos = strrpos($subject, $search); if($pos !== false){ $subject = substr_replace($subject, $replace, $pos, strlen($search)); } return $subject; }
+
+	// Function to insert configuration value into the array literal in the configuration file
 	function configSetting($cf, $setting, $value){
-		if($value === ""){ return $cf; } // Empty
-		$empty = is_bool($value) ? "(true|false)" : "''";
-		$val   = is_bool($value) ? ($value ? "true" : "false") : "'" . preg_replace("/([\\'])/", '\\\$1', $value) . "'";
-		return preg_replace("/'" . preg_quote($setting, "/") . "'(\s*)=>(\s*)" . $empty . "/", "'" . $setting . "'$1=>$2" . $val, $cf);
+		if($value === ''){ return $cf; } // Empty
+		$empty = is_bool($value) ? '(true|false)' : "''";
+		$val   = is_bool($value) ? ($value ? 'true' : 'false') : "'" . preg_replace("/([\\'])/", '\\\$1', $value) . "'";
+
+		// First check if the directive exists in the config file.
+		$directiveHead = "'" . preg_quote($setting, '/') . "'(\s*)=>";
+		$exists = preg_match('/' . $directiveHead . '/', $cf);
+
+		if($exists){
+			// If it exists, simply add the value instead of an empty one
+			return preg_replace('/' . $directiveHead . '(\s*)' . $empty . '/', "'" . $setting . "'$1=>$2" . $val, $cf);
+		} else {
+			// If it does not exist, let's add it to the end of the literal array in the file.
+			return str_lreplace(');', "'" . $setting . "' => " . $val . ",\n);", $cf);
+		}
 	}
 	
 	$e       = array();
@@ -84,23 +103,59 @@
 	if(!is_writable("inc/config.php")){ $e[] = "Your <code>config.php</code> file is not writable by the server. Please make sure it is before proceeding, then reload this page. Often, this is done through giving every system user the write privileges on that file through FTP."; }
 	if(!function_exists("preg_match")){ $e[] = "PHP&#8217;s PCRE support module appears to be missing. Tweet Nest requires Perl-style regular expression support to function."; }
 	if(!function_exists("mysql_connect") && !function_exists("mysqli_connect")){ $e[] = "Neither the MySQL nor the MySQLi library for PHP is installed. One of these are required, along with a MySQL server to connect to and store data in."; }
+
+	// Message shown when people have actively tried to go through OAuth but it failed verification
+	if(isset($_SESSION['status']) && $_SESSION['status'] == 'not verified'){
+		$e[] = '<strong>We could not verify you through Twitter.</strong> Please make sure you&#8217;ve entered the correct credentials on the Twitter authentication page.';
+	}
+	// Message shown when people have actively tried to go through OAuth but there was an old key or other mechanical mishap
+	if(isset($_SESSION['status']) && $_SESSION['status'] == 'try again'){
+		$e[] = '<strong>Something broke during the verification through Twitter.</strong> Please try again.';
+	}
 	
 	// PREPARE VARIABLES
 	$pp   = strpos($_SERVER['REQUEST_URI'], "/setup");
 	$path = is_numeric($pp) ? ($pp > 0 ? substr($_SERVER['REQUEST_URI'], 0, $pp) : "/") : "";
-	$famousTwitterers = array("alyankovic", "aplusk", "billgates", "cnnbrk", "coldplay", "justinbieber"); // SO IMPORTANT!
 	
 	// Someone's submitting! Time to set up!
 	if($post){
+
+
+        // Are we redirecting?
+        if(isset($_POST['redirect']) && !empty($_POST['redirect'])){
+            if(
+                isset($_POST['consumer_key']) && !empty($_POST['consumer_key']) &&
+                isset($_POST['consumer_secret']) && !empty($_POST['consumer_secret'])
+            ){
+                if(!isset($config) || !is_array($config)){
+                    $config = array();
+                }
+
+                $config['consumer_key']    = $_SESSION['entered_consumer_key']    = $_POST['consumer_key'];
+                $config['consumer_secret'] = $_SESSION['entered_consumer_secret'] = $_POST['consumer_secret'];
+
+                require 'redirect.php';
+                exit;
+            } else {
+                $e[] = 'Please fill in your <strong>Twitter app consumer key and secret</strong> before authenticating with Twitter. ' .
+                    'You can get these by creating an app at <a href="http://dev.twitter.com/apps">dev.twitter.com</a>.';
+            }
+        }
+
 		$log[] = "Settings being submitted!";
 		$log[] = "PHP version: " . PHP_VERSION;
-		if(!empty($_POST['twitter_screenname']) && !empty($_POST['tz']) && !empty($_POST['path']) && !empty($_POST['db_hostname']) && !empty($_POST['db_username']) && !empty($_POST['db_database'])){ // Required fields
+		if(
+			empty($e) &&
+			// Required fields
+			!empty($_POST['tz']) &&
+			!empty($_POST['path']) &&
+			!empty($_POST['db_hostname']) &&
+			!empty($_POST['db_username']) &&
+			!empty($_POST['db_database']) &&
+			!empty($_POST['consumer_key']) &&
+			!empty($_POST['consumer_secret'])
+		){
 			$log[] = "All required fields filled in.";
-			if(preg_match("/^[a-zA-Z0-9_]+$/", $_POST['twitter_screenname']) && strlen($_POST['twitter_screenname']) <= 15){
-				$log[] = "Valid Twitter screen name.";
-			} else {
-				$e[] = "Invalid Twitter screen name.";
-			}
 			if(date_default_timezone_set($_POST['tz'])){
 				$log[] = "Valid time zone.";
 			} else {
@@ -114,6 +169,9 @@
 			if(!empty($_POST['maintenance_http_password']) && $_POST['maintenance_http_password'] != $_POST['maintenance_http_password_2']){
 				$e[] = "The two typed admin passwords didn&#8217;t match. Please make sure they&#8217;re the same.";
 			}
+            if (!isset($_SESSION['access_token'])) {
+                $e[] = "You must authorize Tweet Nest to use your Twitter account before continuing.";
+            }
 			$sPath = "/" . trim($_POST['path'], "/");
 			$log[] = "Formatted path: " . $sPath;
 			if(!$e){
@@ -148,25 +206,29 @@
 						$DTP = $_POST['db_table_prefix']; // This has been verified earlier on in the code
 						
 						// Tweets table
-						$q = $db->query("CREATE TABLE `".$DTP."tweets` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `userid` bigint(20) unsigned NOT NULL, `tweetid` varchar(100) NOT NULL, `type` tinyint(4) NOT NULL DEFAULT '0', `time` int(10) unsigned NOT NULL, `text` varchar(255) NOT NULL, `source` varchar(255) NOT NULL, `favorite` tinyint(4) NOT NULL DEFAULT '0', `extra` text NOT NULL, `coordinates` text NOT NULL, `geo` text NOT NULL, `place` text NOT NULL, `contributors` text NOT NULL, PRIMARY KEY (`id`), UNIQUE (`tweetid`), FULLTEXT KEY `text` (`text`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
+						$q = $db->query("CREATE TABLE IF NOT EXISTS `".$DTP."tweets` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `userid` varchar(100) NOT NULL, `tweetid` varchar(100) NOT NULL, `type` tinyint(4) NOT NULL DEFAULT '0', `time` int(10) unsigned NOT NULL, `text` varchar(255) NOT NULL, `source` varchar(255) NOT NULL, `favorite` tinyint(4) NOT NULL DEFAULT '0', `extra` text NOT NULL, `coordinates` text NOT NULL, `geo` text NOT NULL, `place` text NOT NULL, `contributors` text NOT NULL, PRIMARY KEY (`id`), UNIQUE (`tweetid`), FULLTEXT KEY `text` (`text`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
+
 						if(!$q){
 							$e[] = "An error occured while creating table <code>".$DTP."tweets</code>: <code>" . $db->error() . "</code>";
 						} else { $log[] = "Successfully created table ".$DTP."tweets"; }
+
+                        // Alter the tweets text column to support greater than 255 characters, but only if the database version supports it. Otherwise, ignore the error.
+                        $db->query('ALTER TABLE `'.DTP.'tweets` CHANGE `text` `text` VARCHAR(510) NOT NULL');
 						
 						// Tweet users table
-						$q = $db->query("CREATE TABLE `".$DTP."tweetusers` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `userid` bigint(20) unsigned NOT NULL, `screenname` varchar(25) NOT NULL, `realname` varchar(255) NOT NULL, `location` varchar(255) NOT NULL, `description` varchar(255) NOT NULL, `profileimage` varchar(255) NOT NULL, `url` varchar(255) NOT NULL, `extra` text NOT NULL, `enabled` tinyint(4) NOT NULL, PRIMARY KEY (`id`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
+						$q = $db->query("CREATE TABLE IF NOT EXISTS `".$DTP."tweetusers` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `userid` varchar(100) NOT NULL, `screenname` varchar(25) NOT NULL, `realname` varchar(255) NOT NULL, `location` varchar(255) NOT NULL, `description` varchar(255) NOT NULL, `profileimage` varchar(255) NOT NULL, `url` varchar(255) NOT NULL, `extra` text NOT NULL, `enabled` tinyint(4) NOT NULL, PRIMARY KEY (`id`), UNIQUE (`userid`) ) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
 						if(!$q){
 							$e[] = "An error occured while creating table <code>".$DTP."tweetusers</code>: <code>" . $db->error() . "</code>";
 						} else { $log[] = "Successfully created table ".$DTP."tweetusers"; }
 						
 						// Tweet words table
-						$q = $db->query("CREATE TABLE `".$DTP."tweetwords` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `tweetid` int(10) unsigned NOT NULL, `wordid` int(10) unsigned NOT NULL, `frequency` float NOT NULL, PRIMARY KEY (`id`), KEY `tweetwords_tweetid` (`tweetid`), KEY `tweetwords_wordid` (`wordid`), KEY `tweetwords_frequency` (`frequency`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
+						$q = $db->query("CREATE TABLE IF NOT EXISTS `".$DTP."tweetwords` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `tweetid` int(10) unsigned NOT NULL, `wordid` int(10) unsigned NOT NULL, `frequency` float NOT NULL, PRIMARY KEY (`id`), KEY `tweetwords_tweetid` (`tweetid`), KEY `tweetwords_wordid` (`wordid`), KEY `tweetwords_frequency` (`frequency`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
 						if(!$q){
 							$e[] = "An error occured while creating table <code>".$DTP."tweetwords</code>: <code>" . $db->error() . "</code>";
 						} else { $log[] = "Successfully created table ".$DTP."tweetwords"; }
 						
 						// Words table
-						$q = $db->query("CREATE TABLE `".$DTP."words` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `word` varchar(150) NOT NULL, `tweets` int(11) NOT NULL, PRIMARY KEY (`id`), KEY `words_tweets` (`tweets`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
+						$q = $db->query("CREATE TABLE IF NOT EXISTS `".$DTP."words` (`id` int(10) unsigned NOT NULL AUTO_INCREMENT, `word` varchar(150) NOT NULL, `tweets` int(11) NOT NULL, PRIMARY KEY (`id`), KEY `words_tweets` (`tweets`)) ENGINE=MyISAM  DEFAULT CHARSET=utf8");
 						if(!$q){
 							$e[] = "An error occured while creating table <code>".$DTP."words</code>: <code>" . $db->error() . "</code>";
 						} else { $log[] = "Successfully created table ".$DTP."words"; }
@@ -174,7 +236,12 @@
 						if(!$e){
 							// WRITE THE CONFIG FILE, YAY!
 							$cf = file_get_contents("inc/config.php");
-							$cf = configSetting($cf, "twitter_screenname", $_POST['twitter_screenname']);
+                            $cf = configSetting($cf, "consumer_key", $_POST['consumer_key']);
+                            $cf = configSetting($cf, "consumer_secret", $_POST['consumer_secret']);
+							$cf = configSetting($cf, "twitter_screenname", $_SESSION['access_token']['screen_name']);
+							$cf = configSetting($cf, 'your_tw_screenname', $_SESSION['access_token']['screen_name']);
+                            $cf = configSetting($cf, "twitter_token", $_SESSION['access_token']['oauth_token']);
+                            $cf = configSetting($cf, "twitter_token_secr", $_SESSION['access_token']['oauth_token_secret']);
 							$cf = configSetting($cf, "timezone", $_POST['tz']);
 							$cf = configSetting($cf, "path", $sPath);
 							$cf = configSetting($cf, "hostname", $_POST['db_hostname']);
@@ -183,7 +250,6 @@
 							$cf = configSetting($cf, "database", $_POST['db_database']);
 							$cf = configSetting($cf, "table_prefix", $_POST['db_table_prefix']);
 							$cf = configSetting($cf, "maintenance_http_password", $_POST['maintenance_http_password']);
-							$cf = configSetting($cf, "anywhere_apikey", $_POST['anywhere_apikey']);
 							$cf = configSetting($cf, "follow_me_button", !empty($_POST['follow_me_button']));
 							$cf = configSetting($cf, "smartypants", !empty($_POST['smartypants']));
 							$f  = fopen("inc/config.php", "wt");
@@ -206,6 +272,23 @@
 			$e[] = "Not all required fields were filled in!";
 		}
 	}
+
+    // Form preparation
+    $enteredConsumerKey = '';
+    $enteredConsumerSecret = '';
+
+    if(isset($_SESSION['entered_consumer_key']) && !empty($_SESSION['entered_consumer_key'])){
+        $enteredConsumerKey = $_SESSION['entered_consumer_key'];
+    }
+    if(isset($_SESSION['entered_consumer_secret']) && !empty($_SESSION['entered_consumer_secret'])){
+        $enteredConsumerSecret = $_SESSION['entered_consumer_secret'];
+    }
+    if($post && isset($_POST['consumer_key']) && !empty($_POST['consumer_key'])){
+        $enteredConsumerKey = $_POST['consumer_key'];
+    }
+    if($post && isset($_POST['consumer_secret']) && !empty($_POST['consumer_secret'])){
+        $enteredConsumerSecret = $_POST['consumer_secret'];
+    }
 ?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
@@ -467,6 +550,10 @@
 		input.submit:active {
 			padding: 8px 15px 6px;
 		}
+
+        input[type=image] {
+            cursor: pointer;
+        }
 		
 		option.deselected {
 			font-style: italic;
@@ -512,6 +599,14 @@
 		.explanation li {
 			margin: 0 0 .5em;
 		}
+
+        #content strong.authorized {
+            color: #fff;
+            background-color: #0c0;
+            padding: 2px 8px;
+            border-radius: 3px;
+            margin-left: 1px;
+        }
 		
 	</style>
 </head>
@@ -558,10 +653,26 @@ INSTALL LOG: <?php var_dump($log); ?>
 <?php } ?>
 			<h2>Basic settings</h2>
 			<div id="greennotice"><span></span>Green color means the value is <strong>required</strong></div>
+            <div class="input">
+                <label for="consumer_key">Twitter consumer key</label>
+                <div class="field required"><input type="text" class="text code" name="consumer_key" id="consumer_key" value="<?php echo s($enteredConsumerKey); ?>" /></div>
+                <div class="what">The consumer key of an app created and registered on <a href="http://dev.twitter.com/apps">dev.twitter.com</a>.</div>
+            </div>
+            <div class="input">
+                <label for="consumer_secret">Twitter consumer secret</label>
+                <div class="field required"><input type="text" class="text code" name="consumer_secret" id="consumer_secret" value="<?php echo s($enteredConsumerSecret); ?>" /></div>
+                <div class="what">The consumer secret of the above.</div>
+            </div>
 			<div class="input">
-				<label for="twitter_screenname">Twitter screen name</label>
-				<div class="field required"><input type="text" class="text" name="twitter_screenname" id="twitter_screenname" maxlength="15" value="<?php echo s($_POST['twitter_screenname']); ?>" /></div>
-				<div class="what">Your Twitter screen name is the name that&#8217;s in the URL of your profile page. <span class="address">Example: http://twitter.com/<strong><?php echo $famousTwitterers[array_rand($famousTwitterers)]; ?></strong></span></div>
+				<label for="twitter_auth">Twitter</label>
+				<div class="field required">
+                    <?php
+                    if(!isset($_SESSION['access_token'])){
+                        echo '<input type="image" src="inc/twitteroauth/images/lighter.png" alt="Sign in with Twitter" name="redirect" value="redirect">';
+                    } else {
+                        echo '<strong class="authorized">Authorized &#10004;</strong>';
+                    }?></div>
+				<div class="what">Authorize Tweetnest to access your twitter account. Please fill in the consumer key and secret fields before clicking this.</div>
 			</div>
 			<div class="input">
 				<label for="tz">Your time zone</label>
@@ -609,7 +720,7 @@ INSTALL LOG: <?php var_dump($log); ?>
 			</div>
 			<div class="input lastinput">
 				<label for="db_table_prefix">Table name prefix</label>
-				<div class="field required"><input type="text" class="text" name="db_table_prefix" id="db_table_prefix" maxlength="10" value="<?php echo !empty($_POST) ? s($_POST['db_table_prefix']) : s("tn_"); ?>" /></div>
+				<div class="field required"><input type="text" class="text code" name="db_table_prefix" id="db_table_prefix" maxlength="10" value="<?php echo !empty($_POST) ? s($_POST['db_table_prefix']) : s("tn_"); ?>" /></div>
 				<div class="what">The Tweet Archive set up page (that&#8217;s this one!) generates three different tables, and to prevent the names clashing with some already there, here you can type a character sequence prefixed to the name of both tables. Something like <strong>&#8220;ta_&#8221;</strong> or <strong>&#8220;tn_&#8221;</strong> is good.</div>
 			</div>
 			
@@ -633,13 +744,6 @@ INSTALL LOG: <?php var_dump($log); ?>
 				<label for="smartypants">SmartyPants</label>
 				<div class="field"><input type="checkbox" class="checkbox" name="smartypants" id="smartypants" checked="checked" /></div>
 				<div class="what">Use <a href="http://daringfireball.net/projects/smartypants/" target="_blank">SmartyPants</a> to perfect punctuation inside tweets? Changes all "straight quotes" to &#8220;curly quotes&#8221; and more.</div>
-			</div>
-			
-			<h2>@Anywhere integration</h2>
-			<div class="input lastinput">
-				<label for="anywhere_apikey">@Anywhere API key</label>
-				<div class="field"><input type="text" class="text code" name="anywhere_apikey" id="anywhere_apikey" maxlength="30" value="<?php echo s($_POST['anywhere_apikey']); ?>" /></div>
-				<div class="what">If you want hovercard-style information displayed when you mouseover a Twitter username on your archive, insert your @Anywhere API key here. <a href="http://dev.twitter.com/anywhere" target="_blank">Here&#8217;s where to get one &rarr;</a></div>
 			</div>
 			
 			<h2>Style settings</h2>
